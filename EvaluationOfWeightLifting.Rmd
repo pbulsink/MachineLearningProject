@@ -1,0 +1,104 @@
+---
+title: "Evaluation of Weight Lifting Techniques"
+author: "Philip Bulsink"
+date: '2017-02-26'
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(ggplot2)
+library(parallel)
+library(doParallel)
+set.seed(1)
+```
+
+#Synopsis 
+
+
+#Introduction
+Many people collect data on a wide range of aspects of their lives. This is particularly popular amongst individuals interested in personal health and fitness. A range of devices can track steps, sleep quality, heartrate, and other health parameters. However, the data collection is typically for quantification purposes, for example: comparing number of steps between days. However, with advanced machine learning techniques, and properly collected data, these movement detecting devices should be able to predict whether an activity such as weightlifting is being performed correctly. 
+
+#Data Preparation
+The data for this report comes from a study performed by Velloso *et. al.* which described in detail on [their site](http://groupware.les.inf.puc-rio.br/har). In this work, sensors were placed on a subject's upper arm, hand, belt, and on a dumbbell, while the subject performed weight lifting in the proper and in 4 common yet improper ways. A total of 6 subjects were used for this study. 
+```{r loadData}
+#Load training and testing data
+lifting<-read.csv('./data/pml-training.csv', stringsAsFactors = FALSE)
+```
+
+In total, there are `r ncol(lifting)` columns of data, of which most but not all are predictors. By reading [the paper published with this data](http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf), we know that there are additional non-predictive variables (including subject information, data collection time, etc.) and the `classe` variable dictating the weightlifting type (correct (`classe` = 'A', or common error (`classe` = ['B','C','D',or 'E'])). 
+
+Trimming the data to only contain the predictors we are interested will aid in our model development. We are interested in all variables related to 'belt', 'arm', 'dumbbell', and 'forearm'. We will split our data into a training and test set, with 70% of data for model training. We will also sub-split our training data into a training set and a validation set, to ensure that we can do proper predictions. Our validation set will be constructed of a 30% sample from our training set.
+
+```{r dataPrep}
+#Classe should be a factor variable
+lifting$classe<-as.factor(lifting$classe)
+
+#Extract only movement data & 'classe'
+movementData<-grep('arm|dumbbell|belt|forearm|classe', names(lifting))
+lifting<-lifting[,movementData]
+
+#Split data into training and validation sets
+inTest<-createDataPartition(y=lifting$classe, p=0.3, list=FALSE)
+testing<-lifting[inTest,]
+tv<-lifting[-inTest,]
+inTrain<-createDataPartition(y=tv$classe, p=0.7, list=FALSE)
+training<-tv[inTrain,]
+validation<-tv[-inTrain,]
+```
+
+Many of the variables in the data set contain empty or NA values. We'll convert all data to numeric, and drop all the data types that are mostly NA values.
+```{r dataCleanNA, warning=FALSE}
+makeDataNumeric<-function(x){
+    if (class(x) == 'character')
+        x<-as.numeric(x)
+    return(x)
+}
+
+testing[,-ncol(testing)]<-apply(testing[,-ncol(testing)], 2, makeDataNumeric)
+training[,-ncol(training)]<-apply(training[,-ncol(training)], 2, makeDataNumeric)
+validation[,-ncol(validation)]<-apply(validation[,-ncol(validation)], 2, makeDataNumeric)
+
+naNames<-apply(training, 2, function(x) sum(is.na(x))/length(x) > 0.5)
+
+naNames<-naNames[naNames]
+
+testing<-testing[,!(colnames(testing) %in% names(naNames))]
+training<-training[,!(colnames(training) %in% names(naNames))]
+validation<-validation[,!(colnames(validation) %in% names(naNames))]
+```
+
+We've now cut our data set down to `r ncol(training)` columns of data, including the outcome `classe`. 
+
+#Exploratory Analysis
+This is a much more manageable size of data set to attempt to build models against. It's still very difficult to view any corellation between data points and the outcome `classe` that could indicate a reliable model. While `r ncol(training)` is many less variables than before, a correllation plot matrix is `r ncol(training)^2` images, and would be impossible to look at with any detail.
+
+One option in such circumstances it to look at a 'correllation plot'. R has a tool for this in the `corrplot` package.
+```{r corrplot}
+library(corrplot)
+corrplot(cor(training[,-ncol(training)], use='complete.obs'), type = 'lower', order = 'hclust')
+```
+
+From this we can see good correllation (darker blue) between similar points (eg. all of the forearm points are correllated), but poor correllation appears as white or red elsewhere. It may be difficult to classify this data intuitively, so a random forest or other boosted or bagged modesl may be needed. 
+
+#Model Building
+We'll start by building a random forest data model. We'll use parallel processing to speed this up, as it can be a slow step.
+
+```{r first_rf_model_build}
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+
+fitControl <- trainControl(method = "cv",
+                           number = 10,
+                           allowParallel = TRUE)
+
+model1 <- train(classe~., method="rf",data=training, trControl = fitControl)
+
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+#Model Evaluation
+
+#Conclusions
