@@ -11,6 +11,15 @@ library(caret)
 library(ggplot2)
 library(parallel)
 library(doParallel)
+library(randomForest)
+library(gbm)
+library(survival)
+library(splines)
+library(plyr)
+library(ipred)
+library(e1071)
+library(MASS)
+library(klaR)
 set.seed(1)
 ```
 
@@ -85,20 +94,137 @@ From this we can see good correllation (darker blue) between similar points (eg.
 #Model Building
 We'll start by building a random forest data model. We'll use parallel processing to speed this up, as it can be a slow step.
 
-```{r first_rf_model_build}
+```{r first_rf_model_build, cache=TRUE}
 cluster <- makeCluster(detectCores() - 1)
 registerDoParallel(cluster)
 
 fitControl <- trainControl(method = "cv",
                            number = 10,
                            allowParallel = TRUE)
-
-model1 <- train(classe~., method="rf",data=training, trControl = fitControl)
+set.seed(1)
+model1 <- train(classe~., method="rf", data=training, trControl=fitControl)
 
 stopCluster(cluster)
 registerDoSEQ()
 ```
 
+We can see how accurate this first model is by comparing against the validation set:
+
+```{r rf_model_confusion}
+cm1<-confusionMatrix(predict(model1, validation), validation$classe)
+cm1
+```
+
+More models can be compared as well: `model2` will be built after preprocessing the data with principle components analysis, `model3` is a boosted tree method, `model4` is a bagged tree model, `model5` is a linear discriminate analysis, and `model6` uses naive bayes.  
+```{r extra_model_build, cache=TRUE}
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+
+fitControl <- trainControl(method = "cv", number = 10, allowParallel = TRUE)
+fitControl2 <- trainControl(allowParallel = TRUE)
+
+set.seed(1)
+model2 <- train(classe~., method="rf", data=training, trControl=fitControl, preprocess="pca")
+model3 <- train(classe~., method="gbm", data=training, trControl=fitControl2, verbose=FALSE)
+model4 <- train(classe~., method="treebag", data=training, trControl=fitControl2)
+model5 <- train(classe~., method="lda", data=training, trControl=fitControl2)
+model6 <- train(classe~., method="nb", data=training, trControl=fitControl2)
+
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+```{r extra_model_confusion}
+cm2<-confusionMatrix(predict(model2, validation), validation$classe)
+cm3<-confusionMatrix(predict(model3, validation), validation$classe)
+cm4<-confusionMatrix(predict(model4, validation), validation$classe)
+cm5<-confusionMatrix(predict(model5, validation), validation$classe)
+cm6<-confusionMatrix(predict(model6, validation), validation$classe)
+```
+
+We can see that the accuracy of the first model was `r cm1$overall[[1]]`, the preprocessed with pca version had accuracy of `r cm2$overall[[1]]`, the boosted tree method was `r cm3$overall[[1]]`, the bagged method `r cm4$overall[[1]]`, the lda model `r cm5$overall[[1]]`, and the naive bayes `r cm6$overall[[1]]`. 
+
+We can combine each model together to create a more accurate predictor than each model alone would produce. This then feeds into a generalized additive model to predict a combined outcome. 
+```{r combine}
+pred1<-predict(model1, training)
+pred2<-predict(model2, training)
+pred3<-predict(model3, training)
+pred4<-predict(model4, training)
+pred5<-predict(model5, training)
+pred6<-predict(model6, training)
+predOutcome<-training$classe
+trainDF<-data.frame(pred1,pred2,pred3,pred4,pred5,pred6,classe=predOutcome)
+trainDF2<-data.frame(pred1,pred2,pred3,pred4, classe=predOutcome)
+combModFit<-train(classe~., data=trainDF, method='gam')
+combModFit2<-train(classe~., data=trainDF2, method='gam')
+```
+
+We can compare this to the validation data frame, prepared similarly as the training data frame above.
+```{r combine_val, ech0=FALSE}
+val1<-predict(model1, validation)
+val2<-predict(model2, validation)
+val3<-predict(model3, validation)
+val4<-predict(model4, validation)
+val5<-predict(model5, validation)
+val6<-predict(model6, validation)
+valOutcome<-validation$classe
+valDF<-data.frame(pred1=val1,pred2=val2,pred3=val3,pred4=val4,pred5=val5,pred6=val6,classe=valOutcome)
+```
+
+The accuracy of this combination of methods is:
+```{r combine_matrix}
+cfComb<-confusionMatrix(predict(combModFit, valDF), valDF$classe)
+cfComb2<-confusionMatrix(predict(combModFit2, valDF), valDF$classe)
+cfComb$overall[1]
+cfComb$overall[2]
+```
+
 #Model Evaluation
+Thus, the combined methods perform better than each of the individuals on the validation set, but how do they do on the test set?
+```{r test}
+test1<-predict(model1, testing)
+test2<-predict(model2, testing)
+test3<-predict(model3, testing)
+test4<-predict(model4, testing)
+test5<-predict(model5, testing)
+test6<-predict(model6, testing)
+testOutcome<-testing$classe
+testDF<-data.frame(pred1=test1,pred2=test2,pred3=test3,pred4=test4,pred5=test5,pred6=test6,classe=testOutcome)
+cfTest<-confusionMatrix(predict(combModFit, testDF), testDF$classe)
+cfTest
+```
 
 #Conclusions
+
+#Appendix 1: Quiz Results
+Additional testing data is provided for the purposes of a quiz. This data will be loaded, cleaned, and predicted upon here:
+
+```{r quiz}
+quizing<-read.csv('./data/pml-testing.csv', stringsAsFactors = FALSE)
+problem_id<-quizing$problem_id
+
+#Extract only movement data
+quizing<-quizing[,movementData]
+
+#Clean Data
+quizing[,-ncol(quizing)]<-apply(quizing[,-ncol(quizing)], 2, makeDataNumeric)
+
+quizing<-quizing[,!(colnames(quizing) %in% names(naNames))]
+
+quiz1<-predict(model1, testing)
+quiz2<-predict(model2, testing)
+quiz3<-predict(model3, testing)
+quiz4<-predict(model4, testing)
+quiz5<-predict(model5, testing)
+quiz6<-predict(model6, testing)
+quizDF<-data.frame(pred1=test1,pred2=test2,pred3=test3,pred4=test4,pred5=test5,pred6=test6)
+
+quizpredict<-predict(combModFit, quizDF)
+
+as.data.frame(problem_id, quizpredict)
+```
+
+#Appendix 2: R Session Data
+```{r session}
+sessionInfo()
+```
