@@ -6,25 +6,28 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE, warning=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-library(caret)
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+options(tidy=TRUE, scipen = 0, digits = 4)
+library(lattice)
 library(ggplot2)
+library(caret)
 library(parallel)
+library(foreach)
 library(doParallel)
 library(randomForest)
-library(gbm)
 library(survival)
+library(gbm)
 library(splines)
 library(plyr)
 library(ipred)
 library(e1071)
 library(MASS)
-library(klaR)
+library(reshape2)
 set.seed(1)
 ```
 
 #Synopsis 
-
+Weight training is a popular activity, but requires proper training to do correctly. With data collected from a few motion sensors, we can analyze the form of the weight lifting and accurately identify if it is being performed correctly or incorrectly. 
 
 #Introduction
 Many people collect data on a wide range of aspects of their lives. This is particularly popular amongst individuals interested in personal health and fitness. A range of devices can track steps, sleep quality, heartrate, and other health parameters. However, the data collection is typically for quantification purposes, for example: comparing number of steps between days. However, with advanced machine learning techniques, and properly collected data, these movement detecting devices should be able to predict whether an activity such as weightlifting is being performed correctly. 
@@ -48,6 +51,9 @@ lifting$classe<-as.factor(lifting$classe)
 movementData<-grep('arm|dumbbell|belt|forearm|classe', names(lifting))
 lifting<-lifting[,movementData]
 
+#Ensure data is numeric (don't affect classe)
+lifting[,-ncol(lifting)]<-apply(lifting[,-ncol(lifting)], 2, function(x) as.numeric(x))
+
 #Split data into training and validation sets
 inTest<-createDataPartition(y=lifting$classe, p=0.3, list=FALSE)
 testing<-lifting[inTest,]
@@ -57,18 +63,8 @@ training<-tv[inTrain,]
 validation<-tv[-inTrain,]
 ```
 
-Many of the variables in the data set contain empty or NA values. We'll convert all data to numeric, and drop all the data types that are mostly NA values.
+Many of the variables in the data set contain empty or NA values. We'll drop all the data types that are mostly NA values.
 ```{r dataCleanNA, warning=FALSE}
-makeDataNumeric<-function(x){
-    if (class(x) == 'character')
-        x<-as.numeric(x)
-    return(x)
-}
-
-testing[,-ncol(testing)]<-apply(testing[,-ncol(testing)], 2, makeDataNumeric)
-training[,-ncol(training)]<-apply(training[,-ncol(training)], 2, makeDataNumeric)
-validation[,-ncol(validation)]<-apply(validation[,-ncol(validation)], 2, makeDataNumeric)
-
 naNames<-apply(training, 2, function(x) sum(is.na(x))/length(x) > 0.5)
 
 naNames<-naNames[naNames]
@@ -83,29 +79,54 @@ We've now cut our data set down to `r ncol(training)` columns of data, including
 #Exploratory Analysis
 This is a much more manageable size of data set to attempt to build models against. It's still very difficult to view any corellation between data points and the outcome `classe` that could indicate a reliable model. While `r ncol(training)` is many less variables than before, a correllation plot matrix is `r ncol(training)^2` images, and would be impossible to look at with any detail.
 
-One option in such circumstances it to look at a 'correllation plot'. R has a tool for this in the `corrplot` package.
+One option in such circumstances it to look at a 'correllation plot'. This is built using `ggplot2` and `reshape2` packages, melting the correllation matrix to a long data frame before building the plot.
 ```{r corrplot}
-library(corrplot)
-corrplot(cor(training[,-ncol(training)], use='complete.obs'), type = 'lower', order = 'hclust')
+ggplot(data=melt(cor(training[,-ncol(training)])), aes(x=Var1, y=Var2, fill=value)) + 
+    geom_tile() + 
+    scale_fill_distiller(palette = "RdBu", name = "Cor") + 
+    ggtitle('Correllation Plot') + 
+    xlab('') + 
+    ylab('') + 
+    theme_bw() + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
 ```
 
-From this we can see good correllation (darker blue) between similar points (eg. all of the forearm points are correllated), but poor correllation appears as white or red elsewhere. It may be difficult to classify this data intuitively, so a random forest or other boosted or bagged modesl may be needed. 
+From this we can see good correllation (darker red or blue) between similar points (eg. all of the forearm points are correllated), but poor correllation appears as lighter red or blue elsewhere. It may be difficult to classify this data intuitively, so a random forest or other boosted or bagged model may be needed. 
+
+It may be possible to attempt to understand the data by performing principal component analysis (PCA) on the data. This may also improve the performance of models when we develop them. We can take a look at the first few PCA factors to see if they provide any grouping of variable by activity classs.
+
+This is built using `ggfortify` to produce plots, and `cowplot` to draw the plots together on one panel. 
+```{r pca_plots, message=FALSE}
+library(ggfortify)
+pca_a<-autoplot(prcomp(training[,-ncol(training)], scale=TRUE), data=training, colour='classe', x=1, y=2, size=0.1, alpha=0.5) + 
+    theme(legend.position="bottom", legend.title = element_text(colour="white"), legend.text = element_text(colour="white"))
+pca_b<-autoplot(prcomp(training[,-ncol(training)], scale=TRUE), data=training, colour='classe', x=1, y=3, size=0.1, alpha=0.5) + 
+    theme(legend.position="bottom", legend.title = element_text(colour="white"), legend.text = element_text(colour="white"))
+pca_c<-autoplot(prcomp(training[,-ncol(training)], scale=TRUE), data=training, colour='classe', x=2, y=3, size=0.1, alpha=0.5) + 
+    theme(legend.position="bottom")
+
+library(cowplot)
+p<-plot_grid(pca_a, pca_b, pca_c, nrow = 1, align='h')
+title <- ggdraw() + draw_label("PCA Plots of Components 1, 2, and 3", fontface='bold')
+plot_grid(title, p, ncol=1, rel_heights=c(0.1, 1))
+```
+
+We can see that, while the PCA analysis can split the data into discrete groups, this splitting does not show clustering of specific classe factors to any one area. A k-means clustering technique will likely not be a good choice for a model. 
 
 #Model Building
 We'll start by building a random forest data model. We'll use parallel processing to speed this up, as it can be a slow step.
 
-```{r first_rf_model_build, cache=TRUE}
+```{r par start}
 cluster <- makeCluster(detectCores() - 1)
 registerDoParallel(cluster)
 
 fitControl <- trainControl(method = "cv",
-                           number = 10,
+                           number = 20,
                            allowParallel = TRUE)
+```
+```{r first_rf_model_build, cache=TRUE}
 set.seed(1)
 model1 <- train(classe~., method="rf", data=training, trControl=fitControl)
-
-stopCluster(cluster)
-registerDoSEQ()
 ```
 
 We can see how accurate this first model is by comparing against the validation set:
@@ -115,23 +136,14 @@ cm1<-confusionMatrix(predict(model1, validation), validation$classe)
 cm1
 ```
 
-More models can be compared as well: `model2` will be built after preprocessing the data with principle components analysis, `model3` is a boosted tree method, `model4` is a bagged tree model, `model5` is a linear discriminate analysis, and `model6` uses naive bayes.  
+More models can be compared as well: `model2` will be built after preprocessing the data with principle components analysis as above, `model3` is a boosted tree method, `model4` is a bagged tree model, `model5` is a linear discriminate analysis, and `model6` uses a recursive partitioning tree model.
 ```{r extra_model_build, cache=TRUE}
-cluster <- makeCluster(detectCores() - 1)
-registerDoParallel(cluster)
-
-fitControl <- trainControl(method = "cv", number = 10, allowParallel = TRUE)
-fitControl2 <- trainControl(allowParallel = TRUE)
-
 set.seed(1)
 model2 <- train(classe~., method="rf", data=training, trControl=fitControl, preprocess="pca")
-model3 <- train(classe~., method="gbm", data=training, trControl=fitControl2, verbose=FALSE)
-model4 <- train(classe~., method="treebag", data=training, trControl=fitControl2)
-model5 <- train(classe~., method="lda", data=training, trControl=fitControl2)
-model6 <- train(classe~., method="nb", data=training, trControl=fitControl2)
-
-stopCluster(cluster)
-registerDoSEQ()
+model3 <- train(classe~., method="gbm", data=training, trControl=fitControl, verbose=FALSE)
+model4 <- train(classe~., method="treebag", data=training, trControl=fitControl)
+model5 <- train(classe~., method="lda", data=training, trControl=fitControl)
+model6 <- train(classe~., method="rpart", data=training, trControl=fitControl)
 ```
 
 ```{r extra_model_confusion}
@@ -142,59 +154,58 @@ cm5<-confusionMatrix(predict(model5, validation), validation$classe)
 cm6<-confusionMatrix(predict(model6, validation), validation$classe)
 ```
 
-We can see that the accuracy of the first model was `r cm1$overall[[1]]`, the preprocessed with pca version had accuracy of `r cm2$overall[[1]]`, the boosted tree method was `r cm3$overall[[1]]`, the bagged method `r cm4$overall[[1]]`, the lda model `r cm5$overall[[1]]`, and the naive bayes `r cm6$overall[[1]]`. 
+We can see that the accuracy of the first model was `r cm1$overall[[1]]`, the preprocessed with pca version had accuracy of `r cm2$overall[[1]]`, the boosted tree method was `r cm3$overall[[1]]`, the bagged method `r cm4$overall[[1]]`, the lda model `r cm5$overall[[1]]`, and the rpart `r cm6$overall[[1]]`. With the poor performance of the last two models, we know that lda and rpart are less powerful for this type of data.
 
-We can combine each model together to create a more accurate predictor than each model alone would produce. This then feeds into a generalized additive model to predict a combined outcome. 
-```{r combine}
+We can combine a subset of the models together to create a more accurate predictor than each model alone would produce. As well, although we performed preprocessing PCA on the data for model2, the model is nearly equivalent to model 1. 
+
+This then feeds into a gradient boosting model to predict a combined outcome. 
+```{r combine, cache=TRUE, message=FALSE, warning=FALSE}
 pred1<-predict(model1, training)
 pred2<-predict(model2, training)
 pred3<-predict(model3, training)
 pred4<-predict(model4, training)
-pred5<-predict(model5, training)
-pred6<-predict(model6, training)
 predOutcome<-training$classe
-trainDF<-data.frame(pred1,pred2,pred3,pred4,pred5,pred6,classe=predOutcome)
-trainDF2<-data.frame(pred1,pred2,pred3,pred4, classe=predOutcome)
-combModFit<-train(classe~., data=trainDF, method='gam')
-combModFit2<-train(classe~., data=trainDF2, method='gam')
+trainDF<-data.frame(pred1,pred2,pred3,pred4,classe=predOutcome)
+combModFit<-train(classe~., data=trainDF, method='gbm', verbose=FALSE, trControl=fitControl)
+```
+```{r par_end}
+stopCluster(cluster)
+registerDoSEQ()
 ```
 
 We can compare this to the validation data frame, prepared similarly as the training data frame above.
-```{r combine_val, ech0=FALSE}
+```{r combine_val, echo=FALSE}
 val1<-predict(model1, validation)
 val2<-predict(model2, validation)
 val3<-predict(model3, validation)
 val4<-predict(model4, validation)
-val5<-predict(model5, validation)
-val6<-predict(model6, validation)
 valOutcome<-validation$classe
-valDF<-data.frame(pred1=val1,pred2=val2,pred3=val3,pred4=val4,pred5=val5,pred6=val6,classe=valOutcome)
+valDF<-data.frame(pred1=val1,pred2=val2,pred3=val3,pred4=val4,classe=valOutcome)
 ```
 
 The accuracy of this combination of methods is:
 ```{r combine_matrix}
 cfComb<-confusionMatrix(predict(combModFit, valDF), valDF$classe)
-cfComb2<-confusionMatrix(predict(combModFit2, valDF), valDF$classe)
 cfComb$overall[1]
-cfComb$overall[2]
 ```
 
 #Model Evaluation
-Thus, the combined methods perform better than each of the individuals on the validation set, but how do they do on the test set?
+Thus, the combined methods perform as good or better than each of the individuals on the validation set, but how do they do on the test set? 
 ```{r test}
 test1<-predict(model1, testing)
 test2<-predict(model2, testing)
 test3<-predict(model3, testing)
 test4<-predict(model4, testing)
-test5<-predict(model5, testing)
-test6<-predict(model6, testing)
 testOutcome<-testing$classe
-testDF<-data.frame(pred1=test1,pred2=test2,pred3=test3,pred4=test4,pred5=test5,pred6=test6,classe=testOutcome)
-cfTest<-confusionMatrix(predict(combModFit, testDF), testDF$classe)
-cfTest
+testDF<-data.frame(pred1=test1,pred2=test2,pred3=test3,pred4=test4,classe=testOutcome)
+cmTest<-confusionMatrix(predict(combModFit, testDF), testDF$classe)
+cmTest
 ```
 
+So, we get an overall test set accuracy of `r cmTest$overall[[1]]`, with 95% confidence range from `r cmTest$overall[[3]]` to `r cmTest$overall[[4]]`. Note that, with a limited number of testing cases available, improving the prediction's accuracy above where it misclassifies only a handful of the `r nrow(testing)` test samples is incredibly difficult. 
+
 #Conclusions
+In conclusion, we can, with `r cmTest$overall[[1]]` accuracy, detect which way an excercise is being performed. With this knowledge, an amateur weight trainer would be able to not only quantify, but qualify the workout that they are performing, to ensure that their form is correct. This can reduce the chance of injury and maximize the impact of the workout. 
 
 #Appendix 1: Quiz Results
 Additional testing data is provided for the purposes of a quiz. This data will be loaded, cleaned, and predicted upon here:
@@ -207,21 +218,19 @@ problem_id<-quizing$problem_id
 quizing<-quizing[,movementData]
 
 #Clean Data
-quizing[,-ncol(quizing)]<-apply(quizing[,-ncol(quizing)], 2, makeDataNumeric)
+quizing[,-ncol(quizing)]<-apply(quizing[,-ncol(quizing)], 2, function(x) as.numeric(x))
 
 quizing<-quizing[,!(colnames(quizing) %in% names(naNames))]
 
-quiz1<-predict(model1, testing)
-quiz2<-predict(model2, testing)
-quiz3<-predict(model3, testing)
-quiz4<-predict(model4, testing)
-quiz5<-predict(model5, testing)
-quiz6<-predict(model6, testing)
-quizDF<-data.frame(pred1=test1,pred2=test2,pred3=test3,pred4=test4,pred5=test5,pred6=test6)
+quiz1<-predict(model1, quizing)
+quiz2<-predict(model2, quizing)
+quiz3<-predict(model3, quizing)
+quiz4<-predict(model4, quizing)
+quizDF<-data.frame(pred1=quiz1,pred2=quiz2,pred3=quiz3, pred4=quiz4)
 
 quizpredict<-predict(combModFit, quizDF)
 
-as.data.frame(problem_id, quizpredict)
+data.frame(problem_id, quizpredict)
 ```
 
 #Appendix 2: R Session Data
