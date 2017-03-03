@@ -1,5 +1,5 @@
 ---
-title: "Evaluation of Weight Lifting Techniques"
+title: "Evaluation of Weight Lifting Technique"
 author: "Philip Bulsink"
 date: '2017-02-26'
 output: html_document
